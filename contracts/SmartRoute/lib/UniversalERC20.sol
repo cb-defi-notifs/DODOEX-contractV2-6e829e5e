@@ -17,6 +17,8 @@ library UniversalERC20 {
 
     IERC20 private constant ETH_ADDRESS = IERC20(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
 
+    // 1. skip 0 amount
+    // 2. handle ETH transfer
     function universalTransfer(
         IERC20 token,
         address payable to,

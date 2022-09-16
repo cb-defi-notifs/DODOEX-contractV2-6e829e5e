@@ -12,12 +12,12 @@ import {IDODOApproveProxy} from "../DODOApproveProxy.sol";
 import {IERC20} from "../intf/IERC20.sol";
 import {IWETH} from "../intf/IWETH.sol";
 import {SafeMath} from "../lib/SafeMath.sol";
+import {DecimalMath} from "../lib/DecimalMath.sol";
 import {UniversalERC20} from "../SmartRoute/lib/UniversalERC20.sol";
 import {SafeERC20} from "../lib/SafeERC20.sol";
 import {IDODOAdapter} from "../SmartRoute/intf/IDODOAdapter.sol";
 import {IFeeManager} from "../SmartRoute/intf/IFeeManager.sol";
 import {InitializableOwnable} from "../lib/InitializableOwnable.sol";
-
 
 /**
  * @title DODORouteProxy
@@ -25,7 +25,7 @@ import {InitializableOwnable} from "../lib/InitializableOwnable.sol";
  *
  * @notice Entrance of Split trading in DODO platform
  */
-contract DODORouteProxy is InitializableOwnable{
+contract DODORouteProxy is InitializableOwnable {
     using SafeMath for uint256;
     using UniversalERC20 for IERC20;
 
@@ -34,8 +34,10 @@ contract DODORouteProxy is InitializableOwnable{
     address constant _ETH_ADDRESS_ = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
     address public immutable _WETH_;
     address public immutable _DODO_APPROVE_PROXY_;
-    address public _FEE_MANAGER_;
-    mapping (address => bool) public isWhiteListed;
+    mapping(address => bool) public isWhiteListedContract; // is safe for external call
+
+    uint256 public routeFeeRate;
+    address public routeFeeReceiver;
 
     struct PoolInfo {
         uint256 direction;
@@ -45,16 +47,10 @@ contract DODORouteProxy is InitializableOwnable{
         address adapter;
         bytes moreInfo;
     }
-    
-    struct FeeInfo {
-        address rebateTo;
-        uint8 fee;
-        uint256 feeAmount;
-    }
 
     // ============ Events ============
 
-     event OrderHistory(
+    event OrderHistory(
         address fromToken,
         address toToken,
         address sender,
@@ -73,30 +69,29 @@ contract DODORouteProxy is InitializableOwnable{
 
     receive() external payable {}
 
-    constructor (
-        address payable weth,
-        address dodoApproveProxy,
-        address feeManager
-    ) public {
+    // ============ Constructor ============
+
+    constructor(address payable weth, address dodoApproveProxy) public {
         _WETH_ = weth;
         _DODO_APPROVE_PROXY_ = dodoApproveProxy;
-        _FEE_MANAGER_ = feeManager;
     }
 
-    function setNewFeeManager(address _feeManager) external onlyOwner {
-        _FEE_MANAGER_ = _feeManager;
+    // ============ Owner only ============
+
+    function addWhiteList(address contractAddr) public onlyOwner {
+        isWhiteListedContract[contractAddr] = true;
     }
 
-    function addWhiteList (address contractAddr) public onlyOwner {
-        isWhiteListed[contractAddr] = true;
+    function removeWhiteList(address contractAddr) public onlyOwner {
+        isWhiteListedContract[contractAddr] = false;
     }
 
-    function removeWhiteList (address contractAddr) public onlyOwner {
-        isWhiteListed[contractAddr] = false;
-    }
+    // TODO modify route fee rate
+    // TODO modify route fee receiver
 
     // ============ Swap ============
 
+    // Call external black box contracts to finish a swap
     function externalSwap(
         address fromToken,
         address toToken,
@@ -104,73 +99,54 @@ contract DODORouteProxy is InitializableOwnable{
         address swapTarget,
         uint256 fromTokenAmount,
         uint256 minReturnAmount,
+        uint256 brokerFeeRate,
+        address broker,
         bytes memory callDataConcat,
-        bytes memory feeData,
         uint256 deadLine
-    )
-        external
-        payable
-        judgeExpired(deadLine)
-        returns (uint256 returnAmount)
-    {
-        require(minReturnAmount > 0, "DODORouteProxy: RETURN_AMOUNT_ZERO");
-        
-        uint256 _fromTokenAmount = fromTokenAmount;
-        {
-            
-            address _fromToken = fromToken;
-            FeeInfo memory feeInfo;
-            {
-                (address _rebateTo, uint8 _fee) = abi.decode(feeData, (address, uint8));
-                feeInfo.fee = _fee;
-                feeInfo.rebateTo = _rebateTo;
-            }
-            if(feeInfo.fee > 0) {
-                require(feeInfo.fee < 10000, "DODORouteProxy: fee overflow");
-                feeInfo.feeAmount = _fromTokenAmount.mul(feeInfo.fee).div(10000);
-                _fromTokenAmount -= feeInfo.feeAmount;
-                _deposit(msg.sender, _FEE_MANAGER_, _fromToken, feeInfo.feeAmount, _fromToken == _ETH_ADDRESS_);
-                IFeeManager(_FEE_MANAGER_).rebate(feeInfo.rebateTo, feeInfo.feeAmount, _fromToken);
-            }
-        
-        
-            if (_fromToken != _ETH_ADDRESS_) {
-                IDODOApproveProxy(_DODO_APPROVE_PROXY_).claimTokens(
-                    _fromToken,
-                    msg.sender,
-                    address(this),
-                    _fromTokenAmount
-                );
-                IERC20(_fromToken).universalApproveMax(approveTarget, _fromTokenAmount);
-            }
+    ) external payable judgeExpired(deadLine) returns (uint256 returnAmount) {
+        // approve if needed
+        if (approveTarget != address(0)) {
+            IERC20(fromToken).universalApproveMax(approveTarget, fromTokenAmount);
         }
 
+        // transfer in fromToken
+        if (fromToken != _ETH_ADDRESS_) {
+            IDODOApproveProxy(_DODO_APPROVE_PROXY_).claimTokens(
+                fromToken,
+                msg.sender,
+                address(this),
+                fromTokenAmount
+            );
+        }
+
+        // swap
         uint256 toTokenOriginBalance = IERC20(toToken).universalBalanceOf(msg.sender);
         {
-        require(isWhiteListed[swapTarget], "DODORouteProxy: Not Whitelist Contract");
-        (bool success, ) = swapTarget.call{value: fromToken == _ETH_ADDRESS_ ? _fromTokenAmount : 0}(callDataConcat);
-
-        require(success, "DODORouteProxy: External Swap execution Failed");
+            require(isWhiteListedContract[swapTarget], "DODORouteProxy: Not Whitelist Contract");
+            (bool success, ) = swapTarget.call{
+                value: fromToken == _ETH_ADDRESS_ ? fromTokenAmount : 0
+            }(callDataConcat);
+            require(success, "DODORouteProxy: External Swap execution Failed");
         }
 
-        IERC20(toToken).universalTransfer(
-            msg.sender,
-            IERC20(toToken).universalBalanceOf(address(this))
+        // distribute toToken
+        uint256 receiveAmount = IERC20(toToken).universalBalanceOf(msg.sender).sub(
+            toTokenOriginBalance
         );
+        uint256 routeFee = DecimalMath.mulFloor(receiveAmount, routeFeeRate);
+        IERC20(toToken).universalTransfer(routeFeeReceiver, routeFee);
 
-        returnAmount = IERC20(toToken).universalBalanceOf(msg.sender).sub(toTokenOriginBalance);
-        require(returnAmount >= minReturnAmount, "DODORouteProxy: Return amount is not enough");
+        uint256 brokerFee = DecimalMath.mulFloor(receiveAmount, brokerFeeRate);
+        IERC20(toToken).universalTransfer(broker, brokerFee);
 
-        emit OrderHistory(
-            fromToken,
-            toToken,
-            msg.sender,
-            fromTokenAmount,
-            returnAmount
-        );
+        receiveAmount = receiveAmount.sub(routeFee).sub(brokerFee);
+        require(receiveAmount >= minReturnAmount, "DODORouteProxy: Return amount is not enough");
+        IERC20(toToken).universalTransfer(msg.sender, receiveAmount);
+
+        emit OrderHistory(fromToken, toToken, msg.sender, fromTokenAmount, returnAmount);
     }
 
-
+    // split version
     function mixSwap(
         address fromToken,
         address toToken,
@@ -190,61 +166,81 @@ contract DODORouteProxy is InitializableOwnable{
         require(minReturnAmount > 0, "DODORouteProxy: RETURN_AMOUNT_ZERO");
 
         {
-        uint256 _fromTokenAmount = fromTokenAmount;
-        address _fromToken = fromToken;
-        
-        {
-            FeeInfo memory feeInfo;
+            uint256 _fromTokenAmount = fromTokenAmount;
+            address _fromToken = fromToken;
+
             {
-                (address _rebateTo, uint8 _fee) = abi.decode(feeData, (address, uint8));
-                feeInfo.fee = _fee;
-                feeInfo.rebateTo = _rebateTo;
+                FeeInfo memory feeInfo;
+                {
+                    (address _rebateTo, uint8 _fee) = abi.decode(feeData, (address, uint8));
+                    feeInfo.fee = _fee;
+                    feeInfo.rebateTo = _rebateTo;
+                }
+                if (feeInfo.fee > 0) {
+                    require(feeInfo.fee < 10000, "DODORouteProxy: fee overflow");
+                    feeInfo.feeAmount = _fromTokenAmount.mul(feeInfo.fee).div(10000);
+                    _fromTokenAmount -= feeInfo.feeAmount;
+                    _deposit(
+                        msg.sender,
+                        _FEE_MANAGER_,
+                        _fromToken,
+                        feeInfo.feeAmount,
+                        _fromToken == _ETH_ADDRESS_
+                    );
+                    IFeeManager(_FEE_MANAGER_).rebate(
+                        feeInfo.rebateTo,
+                        feeInfo.feeAmount,
+                        _fromToken
+                    );
+                }
             }
-            if(feeInfo.fee > 0) {
-                require(feeInfo.fee < 10000, "DODORouteProxy: fee overflow");
-                feeInfo.feeAmount = _fromTokenAmount.mul(feeInfo.fee).div(10000);
-                _fromTokenAmount -= feeInfo.feeAmount;
-                _deposit(msg.sender, _FEE_MANAGER_, _fromToken, feeInfo.feeAmount, _fromToken == _ETH_ADDRESS_);
-                IFeeManager(_FEE_MANAGER_).rebate(feeInfo.rebateTo, feeInfo.feeAmount, _fromToken);
+
+            address _toToken = toToken;
+
+            uint256 toTokenOriginBalance = IERC20(_toToken).universalBalanceOf(msg.sender);
+
+            _deposit(
+                msg.sender,
+                assetTo[0],
+                _fromToken,
+                _fromTokenAmount,
+                _fromToken == _ETH_ADDRESS_
+            );
+
+            for (uint256 i = 0; i < mixPairs.length; i++) {
+                if (directions & 1 == 0) {
+                    IDODOAdapter(mixAdapters[i]).sellBase(
+                        assetTo[i + 1],
+                        mixPairs[i],
+                        moreInfos[i]
+                    );
+                } else {
+                    IDODOAdapter(mixAdapters[i]).sellQuote(
+                        assetTo[i + 1],
+                        mixPairs[i],
+                        moreInfos[i]
+                    );
+                }
+                directions = directions >> 1;
             }
-        }
 
-        
-        address _toToken = toToken;
-        
-        uint256 toTokenOriginBalance = IERC20(_toToken).universalBalanceOf(msg.sender);
-        
-        _deposit(msg.sender, assetTo[0], _fromToken, _fromTokenAmount, _fromToken == _ETH_ADDRESS_);
-
-        for (uint256 i = 0; i < mixPairs.length; i++) {
-            if (directions & 1 == 0) {
-                IDODOAdapter(mixAdapters[i]).sellBase(assetTo[i + 1],mixPairs[i], moreInfos[i]);
+            if (_toToken == _ETH_ADDRESS_) {
+                returnAmount = IWETH(_WETH_).balanceOf(address(this));
+                IWETH(_WETH_).withdraw(returnAmount);
+                msg.sender.transfer(returnAmount);
             } else {
-                IDODOAdapter(mixAdapters[i]).sellQuote(assetTo[i + 1],mixPairs[i], moreInfos[i]);
+                returnAmount = IERC20(_toToken).tokenBalanceOf(msg.sender).sub(
+                    toTokenOriginBalance
+                );
             }
-            directions = directions >> 1;
+
+            require(returnAmount >= minReturnAmount, "DODORouteProxy: Return amount is not enough");
         }
 
-        if(_toToken == _ETH_ADDRESS_) {
-            returnAmount = IWETH(_WETH_).balanceOf(address(this));
-            IWETH(_WETH_).withdraw(returnAmount);
-            msg.sender.transfer(returnAmount);
-        }else {
-            returnAmount = IERC20(_toToken).tokenBalanceOf(msg.sender).sub(toTokenOriginBalance);
-        }
-
-        require(returnAmount >= minReturnAmount, "DODORouteProxy: Return amount is not enough");
-        }
-
-        emit OrderHistory(
-            fromToken,
-            toToken,
-            msg.sender,
-            fromTokenAmount,
-            returnAmount
-        );
+        emit OrderHistory(fromToken, toToken, msg.sender, fromTokenAmount, returnAmount);
     }
 
+    // linear version
     function dodoMutliSwap(
         uint256 fromTokenAmount,
         uint256 minReturnAmount,
@@ -257,56 +253,74 @@ contract DODORouteProxy is InitializableOwnable{
         uint256 deadLine
     ) external payable judgeExpired(deadLine) returns (uint256 returnAmount) {
         {
-        require(assetFrom.length == splitNumber.length, 'DODORouteProxy: PAIR_ASSETTO_NOT_MATCH');        
-        require(minReturnAmount > 0, "DODORouteProxy: RETURN_AMOUNT_ZERO");
-        uint256 _fromTokenAmount = fromTokenAmount;
-        
-        {
-            FeeInfo memory feeInfo;
+            require(
+                assetFrom.length == splitNumber.length,
+                "DODORouteProxy: PAIR_ASSETTO_NOT_MATCH"
+            );
+            require(minReturnAmount > 0, "DODORouteProxy: RETURN_AMOUNT_ZERO");
+            uint256 _fromTokenAmount = fromTokenAmount;
+
             {
-                (address _rebateTo, uint8 _fee) = abi.decode(feeData, (address, uint8));
-                feeInfo.fee = _fee;
-                feeInfo.rebateTo = _rebateTo;
+                FeeInfo memory feeInfo;
+                {
+                    (address _rebateTo, uint8 _fee) = abi.decode(feeData, (address, uint8));
+                    feeInfo.fee = _fee;
+                    feeInfo.rebateTo = _rebateTo;
+                }
+                if (feeInfo.fee > 0) {
+                    require(feeInfo.fee < 10000, "DODORouteProxy: fee overflow");
+                    feeInfo.feeAmount = _fromTokenAmount.mul(feeInfo.fee).div(10000);
+                    _fromTokenAmount -= feeInfo.feeAmount;
+                    _deposit(
+                        msg.sender,
+                        _FEE_MANAGER_,
+                        midToken[0],
+                        feeInfo.feeAmount,
+                        midToken[0] == _ETH_ADDRESS_
+                    );
+                    IFeeManager(_FEE_MANAGER_).rebate(
+                        feeInfo.rebateTo,
+                        feeInfo.feeAmount,
+                        midToken[0]
+                    );
+                }
             }
-            if(feeInfo.fee > 0) {
-                require(feeInfo.fee < 10000, "DODORouteProxy: fee overflow");
-                feeInfo.feeAmount = _fromTokenAmount.mul(feeInfo.fee).div(10000);
-                _fromTokenAmount -= feeInfo.feeAmount;
-                _deposit(msg.sender, _FEE_MANAGER_, midToken[0], feeInfo.feeAmount, midToken[0] == _ETH_ADDRESS_);
-                IFeeManager(_FEE_MANAGER_).rebate(feeInfo.rebateTo, feeInfo.feeAmount, midToken[0]);
+
+            address fromToken = midToken[0];
+            address toToken = midToken[midToken.length - 1];
+
+            uint256 toTokenOriginBalance = IERC20(toToken).universalBalanceOf(msg.sender);
+
+            _deposit(
+                msg.sender,
+                assetFrom[0],
+                fromToken,
+                _fromTokenAmount,
+                fromToken == _ETH_ADDRESS_
+            );
+
+            _multiSwap(totalWeight, midToken, splitNumber, sequence, assetFrom);
+
+            if (toToken == _ETH_ADDRESS_) {
+                returnAmount = IWETH(_WETH_).balanceOf(address(this));
+                IWETH(_WETH_).withdraw(returnAmount);
+                msg.sender.transfer(returnAmount);
+            } else {
+                returnAmount = IERC20(toToken).tokenBalanceOf(msg.sender).sub(toTokenOriginBalance);
             }
-        }
-        
-        address fromToken = midToken[0];
-        address toToken = midToken[midToken.length - 1];
 
-        uint256 toTokenOriginBalance = IERC20(toToken).universalBalanceOf(msg.sender);
-
-        _deposit(msg.sender, assetFrom[0], fromToken, _fromTokenAmount, fromToken == _ETH_ADDRESS_);
-
-        _multiSwap(totalWeight, midToken, splitNumber, sequence, assetFrom);
-    
-        if(toToken == _ETH_ADDRESS_) {
-            returnAmount = IWETH(_WETH_).balanceOf(address(this));
-            IWETH(_WETH_).withdraw(returnAmount);
-            msg.sender.transfer(returnAmount);
-        }else {
-            returnAmount = IERC20(toToken).tokenBalanceOf(msg.sender).sub(toTokenOriginBalance);
+            require(returnAmount >= minReturnAmount, "DODORouteProxy: Return amount is not enough");
         }
 
-        require(returnAmount >= minReturnAmount, "DODORouteProxy: Return amount is not enough");
-        }
-    
         emit OrderHistory(
             midToken[0], //fromToken
             midToken[midToken.length - 1], //toToken
             msg.sender,
             fromTokenAmount,
             returnAmount
-        );    
+        );
     }
 
-    
     //====================== internal =======================
 
     function _multiSwap(
@@ -315,17 +329,18 @@ contract DODORouteProxy is InitializableOwnable{
         uint256[] memory splitNumber,
         bytes[] memory swapSequence,
         address[] memory assetFrom
-    ) internal { 
-        for(uint256 i = 1; i < splitNumber.length; i++) { 
+    ) internal {
+        for (uint256 i = 1; i < splitNumber.length; i++) {
             // define midtoken address, ETH -> WETH address
-            uint256 curTotalAmount = IERC20(midToken[i]).tokenBalanceOf(assetFrom[i-1]);
-            uint256 curTotalWeight = totalWeight[i-1];
-            
-            for(uint256 j = splitNumber[i-1]; j < splitNumber[i]; j++) {
+            uint256 curTotalAmount = IERC20(midToken[i]).tokenBalanceOf(assetFrom[i - 1]);
+            uint256 curTotalWeight = totalWeight[i - 1];
+
+            for (uint256 j = splitNumber[i - 1]; j < splitNumber[i]; j++) {
                 PoolInfo memory curPoolInfo;
                 {
-                    (address pool, address adapter, uint256 mixPara, bytes memory moreInfo) = abi.decode(swapSequence[j], (address, address, uint256, bytes));
-                
+                    (address pool, address adapter, uint256 mixPara, bytes memory moreInfo) = abi
+                        .decode(swapSequence[j], (address, address, uint256, bytes));
+
                     curPoolInfo.direction = mixPara >> 17;
                     curPoolInfo.weight = (0xffff & mixPara) >> 9;
                     curPoolInfo.poolEdition = (0xff & mixPara);
@@ -334,10 +349,10 @@ contract DODORouteProxy is InitializableOwnable{
                     curPoolInfo.moreInfo = moreInfo;
                 }
 
-                if(assetFrom[i-1] == address(this)) {
+                if (assetFrom[i - 1] == address(this)) {
                     uint256 curAmount = curTotalAmount.mul(curPoolInfo.weight).div(curTotalWeight);
-            
-                    if(curPoolInfo.poolEdition == 1) {   
+
+                    if (curPoolInfo.poolEdition == 1) {
                         //For using transferFrom pool (like dodoV1, Curve)
                         IERC20(midToken[i]).transfer(curPoolInfo.adapter, curAmount);
                     } else {
@@ -345,11 +360,19 @@ contract DODORouteProxy is InitializableOwnable{
                         IERC20(midToken[i]).transfer(curPoolInfo.pool, curAmount);
                     }
                 }
-                
-                if(curPoolInfo.direction == 0) {
-                    IDODOAdapter(curPoolInfo.adapter).sellBase(assetFrom[i], curPoolInfo.pool, curPoolInfo.moreInfo);
+
+                if (curPoolInfo.direction == 0) {
+                    IDODOAdapter(curPoolInfo.adapter).sellBase(
+                        assetFrom[i],
+                        curPoolInfo.pool,
+                        curPoolInfo.moreInfo
+                    );
                 } else {
-                    IDODOAdapter(curPoolInfo.adapter).sellQuote(assetFrom[i], curPoolInfo.pool, curPoolInfo.moreInfo);
+                    IDODOAdapter(curPoolInfo.adapter).sellQuote(
+                        assetFrom[i],
+                        curPoolInfo.pool,
+                        curPoolInfo.moreInfo
+                    );
                 }
             }
         }
