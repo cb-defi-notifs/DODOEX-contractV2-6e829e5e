@@ -44,11 +44,16 @@ contract DSPFunding is DSPVault {
         // But May Happen，reserve >0 But totalSupply = 0
         if (totalSupply == 0) {
             // case 1. initial supply
+            require(quoteBalance > 0, "ZERO_QUOTE_AMOUNT");
             shares = quoteBalance < DecimalMath.mulFloor(baseBalance, _I_)
                 ? DecimalMath.divFloor(quoteBalance, _I_)
                 : baseBalance;
             _BASE_TARGET_ = uint112(shares);
             _QUOTE_TARGET_ = uint112(DecimalMath.mulFloor(shares, _I_));
+            require(shares > 2001, "MINT_AMOUNT_NOT_ENOUGH");
+            require(_QUOTE_TARGET_ > 0, "QUOTE_TARGET_IS_ZERO");
+            _mint(address(0), 1001);
+            shares -= 1001;
         } else if (baseReserve > 0 && quoteReserve > 0) {
             // case 2. normal case
             uint256 baseInputRatio = DecimalMath.divFloor(baseInput, baseReserve);
@@ -75,6 +80,7 @@ contract DSPFunding is DSPVault {
     ) external preventReentrant returns (uint256 baseAmount, uint256 quoteAmount) {
         require(deadline >= block.timestamp, "TIME_EXPIRED");
         require(shareAmount <= _SHARES_[msg.sender], "DLP_NOT_ENOUGH");
+        require(to != address(this), "SELL_BACK_NOT_ALLOWED");
 
         uint256 baseBalance = _BASE_TOKEN_.balanceOf(address(this));
         uint256 quoteBalance = _QUOTE_TOKEN_.balanceOf(address(this));

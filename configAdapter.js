@@ -11,6 +11,17 @@ const { MOONRIVER_CONFIG } = require("./config/moonriver-config");
 const { BOBA_CONFIG } = require("./config/boba-config");
 const { AVAX_CONFIG } = require("./config/avax-config"); 
 const { DASHBOARD_CONFIG } = require("./config/dashboard-config"); 
+const { CFX_CONFIG } = require("./config/cfx-config.js");
+const { LINEA_CONFIG } = require("./config/linea-config");
+const { BASE_CONFIG } = require("./config/base-config");
+const { SCROLL_SEPOLIA_CONFIG } = require("./config/scroll-sepolia-config");
+const { SEPOLIA_CONFIG } = require("./config/sepolia-config");
+const { MANTA_TESTNET_CONFIG } = require("./config/manta-testnet-config");
+const { MANTA_CONFIG } = require("./config/manta-config");
+const { MANTLE_CONFIG } = require("./config/mantle-config");
+const { OPTIMISM_CONFIG } = require("./config/optimism-config");
+const { SCROLL_CONFIG } = require("./config/scroll-config");
+const { DODO_TESTNET_CONFIG } = require("./config/dodo-testnet-config");
 
 exports.GetConfig = function (network, accounts) {
     var CONFIG = {}
@@ -45,8 +56,17 @@ exports.GetConfig = function (network, accounts) {
         case "avax":
             CONFIG = AVAX_CONFIG
             break;
+        case "cfx":
+            CONFIG = CFX_CONFIG
+            break;
+        case "linea":
+            CONFIG = LINEA_CONFIG
+            break;
+        case "base":
+            CONFIG = BASE_CONFIG
+            break;
         case "dashboard":     
-            CONFIG = DASHBOARD_CONFIG
+            CONFIG = SEPOLIA_CONFIG
             break;
         //testnet
         case "kovan":
@@ -59,6 +79,14 @@ exports.GetConfig = function (network, accounts) {
             CONFIG.multiSigAddress = accounts[0]
             CONFIG.defaultMaintainer = accounts[0]
             break;
+        case "scroll-sepolia":
+            CONFIG = SCROLL_SEPOLIA_CONFIG
+            break;
+        case "manta-testnet":
+            CONFIG = MANTA_TESTNET_CONFIG
+            break;
+        case "dodotest":
+            CONFIG = DODO_TESTNET_CONFIG
     }
     return CONFIG
 }

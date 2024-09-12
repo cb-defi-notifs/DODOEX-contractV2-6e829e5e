@@ -17,7 +17,7 @@
  * phrase from a file you've .gitignored so it doesn't accidentally become public.
  *
  */
-
+require("dotenv").config();
 var HDWalletProvider = require("@truffle/hdwallet-provider");
 var privKey = process.env.privKey;
 var infuraId = process.env.infuraId;
@@ -26,6 +26,8 @@ var infuraId = process.env.infuraId;
 // const mnemonic = fs.readFileSync(".secret").toString().trim();
 require("ts-node/register"); // eslint-disable-line
 require("dotenv-flow").config(); // eslint-disable-line
+
+const { LINEASCAN_API_KEY, BASESCAN_API_KEY } = process.env;
 
 module.exports = {
   /**
@@ -39,7 +41,7 @@ module.exports = {
    */
   deploySwitch: {
     DEPLOY_V1:      false,
-    DEPLOY_V2:      false,
+    DEPLOY_V2:      true,
     ERC20V3Factory: false,
     MOCK_TOKEN:     false,
     MOCK_V2_POOL:   false,
@@ -70,7 +72,19 @@ module.exports = {
   },
 
   dashboard: {
+    //host: "localhost",
     port: 24012,
+  },
+
+  api_keys: {
+    etherscan: process.env.ETHERSCAN_API_KEY,
+    arbiscan: process.env.ARBISCAN_API_KEY,
+    lineascan: LINEASCAN_API_KEY,
+    basescan: BASESCAN_API_KEY,
+    polygonscan: process.env.POLYGONSCAN_API_KEY,
+    snowtrace: process.env.SNOWTRACE_API_KEY,
+    scroll: "fakekey",
+    calderaexplorer: "fakekey",
   },
 
   networks: {
@@ -232,11 +246,37 @@ module.exports = {
       skipDryRun: true
     },
 
+    base: {
+      networkCheckTimeout: 1000000,
+      provider: () => {
+        return new HDWalletProvider(privKey, 'https://goerli.base.org')
+      },
+      network_id: 84531,
+      gas: 6000000,
+      gasPrice: 35000000000,
+      // confirmations: 2,
+      // timeoutBlocks: 200,
+      skipDryRun: true
+    },
+
     optimism: {
       provider: () => {
         return new HDWalletProvider(privKey, 'https://mainnet.optimism.io')
       },
       network_id: "10"
+    },
+
+    dodotest: {
+      networkCheckTimeout: 100000,
+      provider: () => { 
+        return new HDWalletProvider({
+          privateKeys: [privKey],
+          providerOrUrl: 'https://dodochain-testnet.alt.technology',
+          chainId: 53457
+        })
+      },
+      network_id: '53457',
+      skipDryRun: true
     },
 
     coverage: {
@@ -252,7 +292,7 @@ module.exports = {
   mocha: {
     timeout: false,
   },
-  plugins: ["solidity-coverage"],
+  plugins: ["solidity-coverage", "truffle-plugin-verify"],
   // Configure your compilers
   compilers: {
     solc: {
